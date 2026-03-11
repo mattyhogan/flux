@@ -5,10 +5,11 @@ export interface FluxConfig {
   jobTimeout?: number;
 }
 
-export interface FluxHost {
+export interface FluxPeer {
   id: string;
   name: string;
-  handlers: string[];
+  capabilities: string[];
+  workspaces: string[];
   startedAt: number;
 }
 
@@ -17,6 +18,7 @@ export interface FluxJob {
   fn: string;
   payload: unknown;
   sourceHost: string;
+  workspace?: string;
 }
 
 export interface FluxResult {
@@ -26,4 +28,15 @@ export interface FluxResult {
   error?: string;
 }
 
+export interface FluxEvent {
+  type: "peer:joined" | "peer:left" | "ctx:updated" | "stream:data" | "stream:end";
+  workspace: string;
+  peerId: string;
+  peerName: string;
+  key?: string;
+  data?: unknown;
+}
+
 export type Handler = (payload: unknown) => Promise<unknown>;
+export type EventHandler = (event: FluxEvent) => void;
+export type StreamHandler = (chunk: string, peerId: string) => void;

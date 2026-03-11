@@ -1,2 +1,11 @@
 export { Flux } from "./flux";
-export type { FluxConfig, FluxHost, FluxJob, FluxResult, Handler } from "./types";
+export type {
+  FluxConfig,
+  FluxPeer,
+  FluxJob,
+  FluxResult,
+  FluxEvent,
+  Handler,
+  EventHandler,
+  StreamHandler,
+} from "./types";

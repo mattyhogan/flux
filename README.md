@@ -1,25 +1,27 @@
 # Flux
 
-A service mesh protocol built on [Lux](https://github.com/mattyhogan/lux). Machines on a network discover each other and exchange work at wire speed.
+A real-time peer-to-peer protocol built on [Lux](https://github.com/mattyhogan/lux).
 
-## How it works
+**MCP connects tools to models. Flux connects models to each other.**
 
-Every host connects to a single Lux instance. On startup, a host registers itself and advertises what functions it can handle. Other hosts discover available services automatically and send work to them. Results come back over pub/sub in milliseconds.
-
-No hardcoded IPs between peers. Just point everyone at Lux and they find each other.
+Any process -- agent, service, script, dashboard -- connects to a single Lux instance and instantly discovers every other peer on the network. No REST APIs between peers. No service URLs. No API keys. Just connect and collaborate.
 
 ```
-  Host A                     Lux                      Host B
+  Alice                      Lux                       Bob
     |                         |                         |
-    |--- register ----------->|<--- register -----------|
-    |    "resize", "compress" |     "transcode"         |
+    |--- join("project") ---->|<--- join("project") ----|
     |                         |                         |
-    |--- send("transcode") -->|                         |
-    |    { file: "v.mp4" }    |--- job pushed --------->|
-    |                         |                         |-- executes transcode()
+    |--- ctx.set("docs") ---->|                         |
+    |                         |---- ctx:updated ------->|  (real-time event)
+    |                         |                         |
+    |--- send("summarize") -->|                         |
+    |                         |--- job pushed --------->|  (routed by capability)
     |                         |<--- result published ---|
     |<-- result returned -----|                         |
-    |    { url: "out.mp4" }   |                         |
+    |                         |                         |
+    |--- stream("analysis") ->|---- stream:data ------->|  (live tokens)
+    |                         |---- stream:data ------->|
+    |                         |---- stream:end -------->|
 ```
 
 ## Quick Start
@@ -28,53 +30,59 @@ No hardcoded IPs between peers. Just point everyone at Lux and they find each ot
 bun add lux-flux
 ```
 
-### Worker (Machine B)
-
 ```typescript
 import { Flux } from "lux-flux";
 
 const flux = new Flux({
   url: "lux://10.0.0.176:6379",
-  name: "media-worker",
+  name: "researcher",
 });
 
-flux.expose("transcode", async (payload) => {
-  const { file, format } = payload as any;
-  // do the work
-  return { output: `${file}.${format}`, size: 1024 };
-});
-
-await flux.start();
-```
-
-### Caller (Machine A)
-
-```typescript
-import { Flux } from "lux-flux";
-
-const flux = new Flux({
-  url: "lux://10.0.0.176:6379",
-  name: "api-server",
+flux.expose("summarize", async (payload: any) => {
+  return summarize(payload.text);
 });
 
 await flux.start();
 
-const result = await flux.send("transcode", {
-  file: "video.mp4",
-  format: "webm",
-});
-// { output: "video.mp4.webm", size: 1024 }
+// join a workspace -- scoped collaboration
+await flux.join("project-alpha");
+
+// shared context -- any peer can read/write
+await flux.ctx.set("project-alpha", "findings", { topics: ["perf", "latency"] });
+const docs = await flux.ctx.get("project-alpha", "docs");
+
+// call any peer by capability (auto-routed)
+const result = await flux.send("translate", { text: "hello", lang: "es" });
+
+// stream live data to the workspace
+await flux.stream("project-alpha", "my-analysis", (async function* () {
+  for await (const token of llm.stream("analyze this...")) {
+    yield token;
+  }
+})());
+
+// listen to everything happening
+flux.on("peer:joined", (e) => console.log(`${e.peerName} joined`));
+flux.on("ctx:updated", (e) => console.log(`${e.peerName} updated ${e.key}`));
+flux.onStream(peer.peerId, "reasoning", (chunk) => process.stdout.write(chunk));
 ```
 
-### Discovery
+## Core Concepts
 
-```typescript
-const hosts = await flux.discover();
-// [
-//   { id: "...", name: "media-worker", handlers: ["transcode"], startedAt: ... },
-//   { id: "...", name: "api-server", handlers: [], startedAt: ... },
-// ]
-```
+### Peers
+Any process that connects to Flux. Agents, services, scripts, UIs. They register with a name and capabilities, heartbeat to stay alive, and disappear cleanly when they stop.
+
+### Workspaces
+Scoped collaboration rooms. Peers join a workspace to work together on something. Events, context, and streams are scoped to workspaces. A peer can be in multiple workspaces.
+
+### Shared Context
+Key-value state within a workspace. Any peer can read and write. No fetching from each other -- just read the shared memory directly. When context changes, every peer in the workspace gets a real-time event.
+
+### Capabilities
+Peers advertise what they can do, not where they live. `flux.expose("summarize", handler)` means "I can summarize." When someone calls `flux.send("summarize", data)`, Flux routes it to a peer with that capability automatically.
+
+### Streams
+Publish live data that other peers can subscribe to. Token-by-token LLM output, sensor readings, progress updates. Delivered via pub/sub to the entire workspace in real-time.
 
 ## API
 
@@ -82,45 +90,61 @@ const hosts = await flux.discover();
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `url` | required | Lux connection string (`lux://host:port`) |
-| `name` | random | Human-readable host name |
+| `url` | required | Lux connection (`lux://host:port`) |
+| `name` | random | Human-readable peer name |
 | `jobTimeout` | 30000 | Timeout in ms for `send()` calls |
-| `heartbeatInterval` | 3000 | How often to refresh registration |
 
-### `flux.expose(name, handler)`
+### Lifecycle
 
-Register a function this host can handle. Call before `start()`.
+| Method | Description |
+|--------|-------------|
+| `flux.expose(name, handler)` | Register a capability. Call before `start()` |
+| `flux.start()` | Connect, register, begin consuming jobs |
+| `flux.stop()` | Deregister, cleanup, disconnect |
 
-### `flux.start()`
+### Workspaces
 
-Connect to Lux, register the host, begin consuming jobs.
+| Method | Description |
+|--------|-------------|
+| `flux.join(workspace)` | Join a workspace, returns current peers |
+| `flux.leave(workspace)` | Leave a workspace |
+| `flux.peers(workspace?)` | List peers (in workspace or globally) |
 
-### `flux.send(name, payload, timeout?)`
+### Communication
 
-Send work to any host that handles `name`. Returns the result. Throws on timeout or handler error.
+| Method | Description |
+|--------|-------------|
+| `flux.send(fn, payload, timeout?)` | RPC to any peer with capability `fn` |
+| `flux.ctx.set(ws, key, value)` | Write shared context |
+| `flux.ctx.get(ws, key)` | Read shared context |
+| `flux.ctx.del(ws, key)` | Delete shared context |
+| `flux.ctx.keys(ws)` | List context keys |
+| `flux.stream(ws, key, iterable)` | Stream data to workspace |
+| `flux.onStream(peerId, key, handler)` | Subscribe to a peer's stream |
 
-### `flux.discover()`
+### Events
 
-Returns all currently registered hosts and their capabilities.
+| Event | Fired when |
+|-------|------------|
+| `peer:joined` | A peer joins a workspace you're in |
+| `peer:left` | A peer leaves or disconnects |
+| `ctx:updated` | Shared context changes |
+| `stream:data` | Stream chunk received |
+| `stream:end` | Stream finished |
 
-### `flux.stop()`
-
-Deregister, drain pending jobs, disconnect.
-
-## Architecture
-
-Flux uses five key patterns in Lux:
+## Lux Key Patterns
 
 | Key | Type | Purpose |
 |-----|------|---------|
-| `flux:host:{id}` | String + TTL | Host metadata, expires if heartbeat stops |
-| `flux:hosts` | Set | Registry of all active host IDs |
-| `flux:fn:{name}` | Set | Which hosts handle a given function |
-| `flux:q:{hostId}` | List | Job queue per host |
-| `flux:notify:{hostId}` | Pub/Sub | Wake worker when job arrives |
-| `flux:res:{hostId}` | Pub/Sub | Deliver results back to caller |
-
-Hosts select targets via round-robin. Each host subscribes to exactly two pub/sub channels (notify + results), keeping connection overhead minimal.
+| `flux:peer:{id}` | String + TTL | Peer metadata, expires on missed heartbeat |
+| `flux:peers` | Set | All active peer IDs |
+| `flux:fn:{name}` | Set | Peers with a given capability |
+| `flux:q:{peerId}` | List | Job queue per peer |
+| `flux:notify:{peerId}` | Pub/Sub | Wake peer when job arrives |
+| `flux:res:{peerId}` | Pub/Sub | Deliver results back to caller |
+| `flux:ws:{name}:peers` | Set | Peers in a workspace |
+| `flux:ws:{name}:ctx:{key}` | String | Shared context within workspace |
+| `flux:ws:{name}:events` | Pub/Sub | Workspace event channel |
 
 ## License
 

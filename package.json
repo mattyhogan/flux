@@ -1,7 +1,7 @@
 {
   "name": "lux-flux",
-  "version": "0.1.0",
-  "description": "A service mesh protocol built on Lux",
+  "version": "0.2.0",
+  "description": "Real-time peer-to-peer protocol built on Lux. MCP connects tools to models. Flux connects models to each other.",
   "type": "module",
   "main": "src/index.ts",
   "types": "src/index.ts",
@@ -20,5 +20,5 @@
     "type": "git",
     "url": "https://github.com/mattyhogan/flux"
   },
-  "keywords": ["lux", "mesh", "service-discovery", "message-queue"]
+  "keywords": ["lux", "mesh", "service-discovery", "real-time", "agents", "peer-to-peer", "pub-sub"]
 }
