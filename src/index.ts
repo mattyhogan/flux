@@ -5,6 +5,8 @@ export type {
   FluxJob,
   FluxResult,
   FluxEvent,
+  CapabilityDef,
+  CapabilityMeta,
   Handler,
   EventHandler,
   StreamHandler,

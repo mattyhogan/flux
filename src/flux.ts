@@ -1,11 +1,14 @@
 import { Lux, LuxSubscriber } from "lux-sdk";
 import { randomUUID } from "crypto";
+import { type z, toJSONSchema } from "zod";
 import type {
   FluxConfig,
   FluxPeer,
   FluxJob,
   FluxResult,
   FluxEvent,
+  CapabilityDef,
+  CapabilityMeta,
   Handler,
   EventHandler,
   StreamHandler,
@@ -21,12 +24,20 @@ function parseUrl(url: string): { host: string; port: number } {
   return { host, port: parseInt(portStr || "6379", 10) };
 }
 
+interface RegisteredCapability {
+  handler: Handler;
+  schema?: z.ZodType;
+  description?: string;
+  retry: number;
+  meta: CapabilityMeta;
+}
+
 export class Flux {
   private cmd: Lux;
   private sub: LuxSubscriber;
   private id: string;
   private name: string;
-  private handlers = new Map<string, Handler>();
+  private capabilities = new Map<string, RegisteredCapability>();
   private pending = new Map<string, { resolve: (r: FluxResult) => void; timer: ReturnType<typeof setTimeout> }>();
   private eventHandlers = new Map<string, Set<EventHandler>>();
   private streamHandlers = new Map<string, StreamHandler>();
@@ -36,6 +47,7 @@ export class Flux {
   private jobTimeout: number;
   private roundRobin = new Map<string, number>();
   private workspaces = new Set<string>();
+  private shuttingDown = false;
 
   readonly ctx: FluxContext;
 
@@ -57,14 +69,40 @@ export class Flux {
     return this.name;
   }
 
-  expose(fn: string, handler: Handler): this {
-    this.handlers.set(fn, handler);
+  expose<T extends z.ZodType>(name: string, def: CapabilityDef<T>): this;
+  expose(name: string, handler: Handler): this;
+  expose(name: string, defOrHandler: CapabilityDef | Handler): this {
+    if (typeof defOrHandler === "function") {
+      this.capabilities.set(name, {
+        handler: defOrHandler,
+        retry: 0,
+        meta: { name },
+      });
+    } else {
+      const def = defOrHandler;
+      const meta: CapabilityMeta = { name };
+      if (def.description) meta.description = def.description;
+      if (def.schema) {
+        try {
+          meta.schema = toJSONSchema(def.schema);
+        } catch {}
+      }
+      this.capabilities.set(name, {
+        handler: def.handler,
+        schema: def.schema,
+        description: def.description,
+        retry: def.retry || 0,
+        meta,
+      });
+    }
     return this;
   }
 
   async start(): Promise<void> {
     await this.cmd.connect();
     await this.sub.connect();
+
+    this.trapSignals();
 
     await this.register();
     this.heartbeatTimer = setInterval(() => this.register(), HEARTBEAT_MS);
@@ -149,17 +187,23 @@ export class Flux {
     const results = await this.cmd.pipeline(commands);
 
     const peers: FluxPeer[] = [];
+    const stale: string[] = [];
     for (let i = 0; i < peerIds.length; i++) {
       const val = results[i];
       if (!val || typeof val !== "string") {
-        if (workspace) this.cmd.command("SREM", `flux:ws:${workspace}:peers`, peerIds[i]);
-        else this.cmd.command("SREM", "flux:peers", peerIds[i]);
+        stale.push(peerIds[i]);
         continue;
       }
       try {
         peers.push(JSON.parse(val));
       } catch {}
     }
+
+    if (stale.length > 0) {
+      const setKey = workspace ? `flux:ws:${workspace}:peers` : "flux:peers";
+      this.cmd.pipeline(stale.map((id) => ["SREM", setKey, id] as (string | number)[]));
+    }
+
     return peers;
   }
 
@@ -220,6 +264,22 @@ export class Flux {
     return result.data;
   }
 
+  async describe(fn: string): Promise<CapabilityMeta | null> {
+    const hosts = await this.cmd.smembers(`flux:fn:${fn}`);
+    if (hosts.length === 0) return null;
+
+    for (const hostId of hosts) {
+      const raw = await this.cmd.get(`flux:peer:${hostId}`);
+      if (!raw) continue;
+      try {
+        const peer: FluxPeer = JSON.parse(raw);
+        const cap = peer.capabilities.find((c) => c.name === fn);
+        if (cap) return cap;
+      } catch {}
+    }
+    return null;
+  }
+
   async stream(workspace: string, key: string, gen: AsyncIterable<string>): Promise<void> {
     for await (const chunk of gen) {
       const event: FluxEvent = {
@@ -265,6 +325,8 @@ export class Flux {
   }
 
   async stop(): Promise<void> {
+    if (this.shuttingDown) return;
+    this.shuttingDown = true;
     this.consuming = false;
     this.started = false;
 
@@ -295,7 +357,7 @@ export class Flux {
       ["SREM", "flux:peers", this.id],
       ["DEL", `flux:q:${this.id}`],
       ["DEL", `flux:peer:${this.id}:ws`],
-      ...[...this.handlers.keys()].map((fn) => ["SREM", `flux:fn:${fn}`, this.id] as (string | number)[]),
+      ...[...this.capabilities.keys()].map((fn) => ["SREM", `flux:fn:${fn}`, this.id] as (string | number)[]),
       ...[...this.workspaces].map((ws) => ["SREM", `flux:ws:${ws}:peers`, this.id] as (string | number)[]),
     ];
 
@@ -306,6 +368,14 @@ export class Flux {
     await this.sub.unsubscribe(`flux:res:${this.id}`);
     this.sub.disconnect();
     this.cmd.disconnect();
+  }
+
+  private trapSignals(): void {
+    const shutdown = () => {
+      this.stop().then(() => process.exit(0)).catch(() => process.exit(1));
+    };
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
   }
 
   private emit(type: string, event: FluxEvent): void {
@@ -319,7 +389,7 @@ export class Flux {
     const meta: FluxPeer = {
       id: this.id,
       name: this.name,
-      capabilities: [...this.handlers.keys()],
+      capabilities: [...this.capabilities.values()].map((c) => c.meta),
       workspaces: [...this.workspaces],
       startedAt: Date.now(),
     };
@@ -327,7 +397,7 @@ export class Flux {
     await this.cmd.pipeline([
       ["SET", `flux:peer:${this.id}`, JSON.stringify(meta), "EX", PEER_TTL_S],
       ["SADD", "flux:peers", this.id],
-      ...[...this.handlers.keys()].map((fn) => ["SADD", `flux:fn:${fn}`, this.id] as (string | number)[]),
+      ...[...this.capabilities.keys()].map((fn) => ["SADD", `flux:fn:${fn}`, this.id] as (string | number)[]),
     ]);
   }
 
@@ -338,18 +408,13 @@ export class Flux {
     while ((raw = await this.cmd.rpop(`flux:q:${this.id}`)) !== null) {
       try {
         const job: FluxJob = JSON.parse(raw);
-        const handler = this.handlers.get(job.fn);
+        const cap = this.capabilities.get(job.fn);
         let result: FluxResult;
 
-        if (!handler) {
+        if (!cap) {
           result = { jobId: job.id, ok: false, error: `unknown function "${job.fn}"` };
         } else {
-          try {
-            const data = await handler(job.payload);
-            result = { jobId: job.id, ok: true, data };
-          } catch (err: any) {
-            result = { jobId: job.id, ok: false, error: err?.message || "handler error" };
-          }
+          result = await this.executeJob(job, cap);
         }
 
         await this.cmd.publish(`flux:res:${job.sourceHost}`, JSON.stringify(result));
@@ -357,9 +422,43 @@ export class Flux {
     }
   }
 
+  private async executeJob(job: FluxJob, cap: RegisteredCapability): Promise<FluxResult> {
+    const maxAttempts = cap.retry + 1;
+    const attempt = job.attempt || 1;
+
+    let payload = job.payload;
+    if (cap.schema) {
+      const parsed = cap.schema.safeParse(payload);
+      if (!parsed.success) {
+        return {
+          jobId: job.id,
+          ok: false,
+          error: `validation error: ${parsed.error.message}`,
+        };
+      }
+      payload = parsed.data;
+    }
+
+    try {
+      const data = await cap.handler(payload);
+      return { jobId: job.id, ok: true, data };
+    } catch (err: any) {
+      if (attempt < maxAttempts) {
+        const retryJob: FluxJob = { ...job, attempt: attempt + 1 };
+        await this.cmd.pipeline([
+          ["LPUSH", `flux:q:${this.id}`, JSON.stringify(retryJob)],
+          ["PUBLISH", `flux:notify:${this.id}`, retryJob.id],
+        ]);
+        return { jobId: job.id, ok: false, error: `retry ${attempt}/${maxAttempts}: ${err?.message}` };
+      }
+      return { jobId: job.id, ok: false, error: err?.message || "handler error" };
+    }
+  }
+
   private handleResult(message: string): void {
     try {
       const result: FluxResult = JSON.parse(message);
+      if (result.error?.startsWith("retry ")) return;
       const entry = this.pending.get(result.jobId);
       if (entry) {
         clearTimeout(entry.timer);

@@ -1,16 +1,23 @@
+import type { z } from "zod";
+
 export interface FluxConfig {
   url: string;
   name?: string;
-  heartbeatInterval?: number;
   jobTimeout?: number;
 }
 
 export interface FluxPeer {
   id: string;
   name: string;
-  capabilities: string[];
+  capabilities: CapabilityMeta[];
   workspaces: string[];
   startedAt: number;
+}
+
+export interface CapabilityMeta {
+  name: string;
+  description?: string;
+  schema?: unknown;
 }
 
 export interface FluxJob {
@@ -19,6 +26,7 @@ export interface FluxJob {
   payload: unknown;
   sourceHost: string;
   workspace?: string;
+  attempt?: number;
 }
 
 export interface FluxResult {
@@ -35,6 +43,13 @@ export interface FluxEvent {
   peerName: string;
   key?: string;
   data?: unknown;
+}
+
+export interface CapabilityDef<T extends z.ZodType = z.ZodType> {
+  description?: string;
+  schema?: T;
+  handler: (payload: z.infer<T>) => Promise<unknown>;
+  retry?: number;
 }
 
 export type Handler = (payload: unknown) => Promise<unknown>;

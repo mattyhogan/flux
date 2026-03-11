@@ -21,9 +21,9 @@ console.log("[1/5] discovering peers...");
 const peers = await flux.peers("demo");
 console.log(`  found ${peers.length} peers: ${peers.map((p) => p.name).join(", ")}`);
 
-const caps = peers.flatMap((p) => p.capabilities);
+const capNames = peers.flatMap((p) => p.capabilities.map((c) => c.name));
 const needed = ["research", "draft"];
-const missing = needed.filter((c) => !caps.includes(c));
+const missing = needed.filter((c) => !capNames.includes(c));
 if (missing.length > 0) {
   console.log(`\n  missing capabilities: ${missing.join(", ")}`);
   console.log("  start the researcher and writer peers first.");
