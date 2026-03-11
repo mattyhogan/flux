@@ -1,4 +1,4 @@
-import Redis from "ioredis";
+import { Lux, LuxSubscriber } from "lux-sdk";
 import { randomUUID } from "crypto";
 import type { FluxConfig, FluxHost, FluxJob, FluxResult, Handler } from "./types";
 
@@ -13,8 +13,8 @@ function parseUrl(url: string): { host: string; port: number } {
 }
 
 export class Flux {
-  private cmd: Redis;
-  private sub: Redis;
+  private cmd: Lux;
+  private sub: LuxSubscriber;
   private id: string;
   private name: string;
   private handlers = new Map<string, Handler>();
@@ -27,8 +27,8 @@ export class Flux {
 
   constructor(config: FluxConfig) {
     const { host, port } = parseUrl(config.url);
-    this.cmd = new Redis({ host, port, lazyConnect: true, maxRetriesPerRequest: 3 });
-    this.sub = new Redis({ host, port, lazyConnect: true, maxRetriesPerRequest: 3 });
+    this.cmd = new Lux({ host, port });
+    this.sub = new LuxSubscriber({ host, port });
     this.id = randomUUID();
     this.name = config.name || this.id.slice(0, 8);
     this.jobTimeout = config.jobTimeout || DEFAULT_TIMEOUT_MS;
@@ -46,15 +46,13 @@ export class Flux {
     await this.register();
     this.heartbeatTimer = setInterval(() => this.register(), HEARTBEAT_MS);
 
-    this.sub.on("message", (channel: string, message: string) => {
-      if (channel === `flux:notify:${this.id}`) {
-        this.drain();
-      } else if (channel === `flux:res:${this.id}`) {
-        this.handleResult(message);
-      }
+    await this.sub.subscribe(`flux:notify:${this.id}`, () => {
+      this.drain();
     });
 
-    await this.sub.subscribe(`flux:notify:${this.id}`, `flux:res:${this.id}`);
+    await this.sub.subscribe(`flux:res:${this.id}`, (_channel, message) => {
+      this.handleResult(message);
+    });
 
     this.consuming = true;
     this.started = true;
@@ -88,10 +86,10 @@ export class Flux {
       this.pending.set(job.id, { resolve, timer });
     });
 
-    const pipeline = this.cmd.pipeline();
-    pipeline.lpush(`flux:q:${targetHost}`, JSON.stringify(job));
-    pipeline.publish(`flux:notify:${targetHost}`, job.id);
-    await pipeline.exec();
+    await this.cmd.pipeline([
+      ["LPUSH", `flux:q:${targetHost}`, JSON.stringify(job)],
+      ["PUBLISH", `flux:notify:${targetHost}`, job.id],
+    ]);
 
     const result = await resultPromise;
     if (!result.ok) throw new Error(result.error);
@@ -102,22 +100,18 @@ export class Flux {
     const hostIds = await this.cmd.smembers("flux:hosts");
     if (hostIds.length === 0) return [];
 
-    const pipeline = this.cmd.pipeline();
-    for (const id of hostIds) {
-      pipeline.get(`flux:host:${id}`);
-    }
-    const results = await pipeline.exec();
-    if (!results) return [];
+    const commands = hostIds.map((id) => ["GET", `flux:host:${id}`] as (string | number)[]);
+    const results = await this.cmd.pipeline(commands);
 
     const hosts: FluxHost[] = [];
     for (let i = 0; i < hostIds.length; i++) {
-      const [err, val] = results[i];
-      if (err || !val) {
-        this.cmd.srem("flux:hosts", hostIds[i]);
+      const val = results[i];
+      if (!val || typeof val !== "string") {
+        this.cmd.command("SREM", "flux:hosts", hostIds[i]);
         continue;
       }
       try {
-        hosts.push(JSON.parse(val as string));
+        hosts.push(JSON.parse(val));
       } catch {}
     }
     return hosts;
@@ -138,16 +132,15 @@ export class Flux {
     }
     this.pending.clear();
 
-    const pipeline = this.cmd.pipeline();
-    pipeline.del(`flux:host:${this.id}`);
-    pipeline.srem("flux:hosts", this.id);
-    pipeline.del(`flux:q:${this.id}`);
-    for (const fn of this.handlers.keys()) {
-      pipeline.srem(`flux:fn:${fn}`, this.id);
-    }
-    await pipeline.exec();
+    await this.cmd.pipeline([
+      ["DEL", `flux:host:${this.id}`],
+      ["SREM", "flux:hosts", this.id],
+      ["DEL", `flux:q:${this.id}`],
+      ...[...this.handlers.keys()].map((fn) => ["SREM", `flux:fn:${fn}`, this.id] as (string | number)[]),
+    ]);
 
-    await this.sub.unsubscribe();
+    await this.sub.unsubscribe(`flux:notify:${this.id}`);
+    await this.sub.unsubscribe(`flux:res:${this.id}`);
     this.sub.disconnect();
     this.cmd.disconnect();
   }
@@ -160,13 +153,11 @@ export class Flux {
       startedAt: Date.now(),
     };
 
-    const pipeline = this.cmd.pipeline();
-    pipeline.set(`flux:host:${this.id}`, JSON.stringify(meta), "EX", HOST_TTL_S);
-    pipeline.sadd("flux:hosts", this.id);
-    for (const fn of this.handlers.keys()) {
-      pipeline.sadd(`flux:fn:${fn}`, this.id);
-    }
-    await pipeline.exec();
+    await this.cmd.pipeline([
+      ["SET", `flux:host:${this.id}`, JSON.stringify(meta), "EX", HOST_TTL_S],
+      ["SADD", "flux:hosts", this.id],
+      ...[...this.handlers.keys()].map((fn) => ["SADD", `flux:fn:${fn}`, this.id] as (string | number)[]),
+    ]);
   }
 
   private async drain(): Promise<void> {

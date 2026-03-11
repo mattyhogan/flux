@@ -9,7 +9,7 @@
     "build": "bun build src/index.ts --outdir dist --target node"
   },
   "dependencies": {
-    "ioredis": "^5.4.1"
+    "lux-sdk": "file:../lux/sdk"
   },
   "devDependencies": {
     "typescript": "^5.7.0",
@@ -20,5 +20,5 @@
     "type": "git",
     "url": "https://github.com/mattyhogan/flux"
   },
-  "keywords": ["lux", "redis", "rpc", "mesh", "service-discovery", "message-queue"]
+  "keywords": ["lux", "mesh", "service-discovery", "message-queue"]
 }
