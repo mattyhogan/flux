@@ -164,14 +164,34 @@ export class Flux {
   }
 
   async send(fn: string, payload: unknown, timeout?: number): Promise<unknown> {
-    const hosts = await this.cmd.smembers(`flux:fn:${fn}`);
-    if (hosts.length === 0) {
+    const allHosts = await this.cmd.smembers(`flux:fn:${fn}`);
+    if (allHosts.length === 0) {
       throw new Error(`no peer handles "${fn}"`);
     }
 
-    const idx = (this.roundRobin.get(fn) || 0) % hosts.length;
+    const checks = await this.cmd.pipeline(
+      allHosts.map((id) => ["EXISTS", `flux:peer:${id}`] as (string | number)[])
+    );
+    const alive: string[] = [];
+    const stale: string[] = [];
+    for (let i = 0; i < allHosts.length; i++) {
+      if (checks[i] === 1) alive.push(allHosts[i]);
+      else stale.push(allHosts[i]);
+    }
+
+    if (stale.length > 0) {
+      this.cmd.pipeline(
+        stale.map((id) => ["SREM", `flux:fn:${fn}`, id] as (string | number)[])
+      );
+    }
+
+    if (alive.length === 0) {
+      throw new Error(`no live peer handles "${fn}"`);
+    }
+
+    const idx = (this.roundRobin.get(fn) || 0) % alive.length;
     this.roundRobin.set(fn, idx + 1);
-    const targetHost = hosts[idx];
+    const targetHost = alive[idx];
 
     const job: FluxJob = {
       id: randomUUID(),
