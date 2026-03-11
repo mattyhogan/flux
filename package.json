@@ -1,0 +1,24 @@
+{
+  "name": "lux-flux",
+  "version": "0.1.0",
+  "description": "A service mesh protocol built on Lux",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target node"
+  },
+  "dependencies": {
+    "ioredis": "^5.4.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "@types/node": "^22.0.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mattyhogan/flux"
+  },
+  "keywords": ["lux", "redis", "rpc", "mesh", "service-discovery", "message-queue"]
+}
