@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { Lux } from "lux-sdk";
+import { Lux } from "@luxdb/sdk";
 import type { FluxPeer, CapabilityMeta } from "./types";
 
 const DEFAULT_URL = "lux://10.0.0.176:6379";

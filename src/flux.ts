@@ -1,4 +1,4 @@
-import { Lux, LuxSubscriber } from "lux-sdk";
+import { Lux, LuxSubscriber } from "@luxdb/sdk";
 import { randomUUID } from "crypto";
 import { type z, toJSONSchema } from "zod";
 import type {
